@@ -427,12 +427,12 @@ function vPalpites() {
     let body;
     if (!opts.length) body = '<p class="muted small" style="margin-top:10px">Opções liberadas quando o organizador cadastrar os finalistas.</p>';
     else if (opts.length > 6) {
-      body = `<select class="field" style="margin-top:12px" data-act="pickSel" data-ev="${esc(e.id)}" ${st.open && S.me ? '' : 'disabled'}>
+      body = `<select class="field" style="margin-top:12px" data-act="pickSel" data-ev="${esc(e.id)}" ${st.open ? '' : 'disabled'}>
         <option value="">— escolha —</option>${opts.map((o) => `<option ${mine === o ? 'selected' : ''} value="${esc(o)}">${esc(o)}${showDist ? ` (${cnt(o)})` : ''}${e.result === o ? ' ✅' : ''}</option>`).join('')}</select>`;
     } else {
       body = `<div class="opts">${opts.map((o) => {
         const pct = all.length ? Math.round((cnt(o) / all.length) * 100) : 0;
-        return `<button class="btn opt ${mine === o ? 'on' : ''} ${e.result === o ? 'right' : ''}" data-act="pick" data-ev="${esc(e.id)}" data-v="${esc(o)}" ${st.open && S.me ? '' : 'disabled'}>
+        return `<button class="btn opt ${mine === o ? 'on' : ''} ${e.result === o ? 'right' : ''}" data-act="pick" data-ev="${esc(e.id)}" data-v="${esc(o)}" ${st.open ? '' : 'disabled'}>
           ${esc(o)}${showDist ? ` · ${cnt(o)}` : ''}${showDist ? `<span class="bar" style="width:${pct}%"></span>` : ''}</button>`;
       }).join('')}</div>`;
     }
@@ -453,6 +453,7 @@ function vPalpites() {
     return `<tr class="${r.id === S.me ? 'me' : ''}"><td>${pos}º</td><td>${esc(r.name)}</td><td class="muted small">${r.hits}/${r.decided}</td><td class="pts">${r.points}</td></tr>`;
   }).join('');
   return `<h2 class="sec">Palpites da turma<small>Sem apostas, só a resenha. Um palpite por pessoa em cada evento, editável até o início.</small></h2>
+    ${needJoin('palpitar')}
     ${cards}
     <h2 class="sec">Ranking</h2>
     <div class="card"><p class="small muted" style="margin-top:0"><b>Pontuação:</b> 3 pontos por palpite certo, 0 por errado. Os palpites fecham no horário previsto de início, pelo relógio do servidor. O organizador lança os resultados oficiais à mão. Mesma pontuação = mesma posição. Evento cancelado, adiado ou sem vencedor é anulado: ninguém pontua.</p>
@@ -472,7 +473,7 @@ function vTV() {
       ${p.event_ids.map((id, i) => {
         const e = ev(id); if (!e) return '';
         const pct = votes.length ? Math.round((counts[i] / votes.length) * 100) : 0;
-        return `<button class="btn vote ${mine === id ? 'on' : ''} ${counts[i] === max && max > 0 ? 'lead' : ''}" data-act="tv" data-poll="${esc(p.id)}" data-v="${esc(id)}" ${closed || !S.me ? 'disabled' : ''}>
+        return `<button class="btn vote ${mine === id ? 'on' : ''} ${counts[i] === max && max > 0 ? 'lead' : ''}" data-act="tv" data-poll="${esc(p.id)}" data-v="${esc(id)}" ${closed ? 'disabled' : ''}>
           <span class="fill" style="width:${pct}%"></span>
           <span class="in"><span><b>${SPORTS[e.sport].emoji} ${esc(e.title)}</b><br><span class="muted tiny">${e.starts_at ? fmtTime(e.starts_at) : 'A confirmar'}${mine === id ? ' · seu voto' : ''}</span></span>
           <span class="pct">${pct}%</span></span></button>`;
@@ -481,7 +482,15 @@ function vTV() {
     </div>`;
   }).join('');
   return `<h2 class="sec">Disputa pela TV<small>Quando tem jogo ao mesmo tempo, a turma decide o que vai na tela principal.</small></h2>
+    ${needJoin('votar')}
     ${polls || '<p class="muted">Nenhuma votação aberta.</p>'}`;
+}
+
+function needJoin(what) {
+  if (S.me) return '';
+  return `<div class="card glow"><h3>✋ Antes de ${what}, diga quem você é</h3>
+    <p class="small muted">Confirme presença no Convite (só o nome). Já confirmou? Então foi em outro navegador ou aparelho — se abriu pelo WhatsApp, abra o link no Safari/Chrome, ou vice-versa.</p>
+    <button class="btn primary" style="width:100%" data-tab-link="convite">Confirmar presença</button></div>`;
 }
 
 function vFooter() {
@@ -641,10 +650,12 @@ const actions = {
   itemEdit(b) { S.editItem = b.dataset.id; render(true); $('#itName')?.focus(); },
   itemCancel() { S.editItem = null; render(true); },
   async itemDel(b) { if (armed('i' + b.dataset.id, b)) await g('remove_item', { p_id: b.dataset.id }, 'Item removido'); },
-  async pick(b) { await g('set_pick', { p_event: b.dataset.ev, p_choice: b.dataset.v }, 'Palpite registrado 🎯'); },
+  async pick(b) {
+    if (!S.me) { toast(ERRORS.ENTRE_PRIMEIRO, true); go('convite'); return; } await g('set_pick', { p_event: b.dataset.ev, p_choice: b.dataset.v }, 'Palpite registrado 🎯'); },
   async retry() { await safeLoad(); if (!S.netError) toast('Atualizado ✅'); },
   async admSignups(b) { await call('admin_set_signups', { p_open: b.dataset.v === '1' }, b.dataset.v === '1' ? 'Inscrições reabertas' : 'Inscrições fechadas'); },
-  async tv(b) { await g('cast_tv_vote', { p_poll: b.dataset.poll, p_event: b.dataset.v }, 'Voto computado 📺'); },
+  async tv(b) {
+    if (!S.me) { toast(ERRORS.ENTRE_PRIMEIRO, true); go('convite'); return; } await g('cast_tv_vote', { p_poll: b.dataset.poll, p_event: b.dataset.v }, 'Voto computado 📺'); },
 
   async admLogin() {
     const { error } = await sb.auth.signInWithPassword({ email: $('#admEmail').value.trim(), password: $('#admPass').value });
@@ -715,6 +726,7 @@ document.addEventListener('change', async (ev) => {
   try {
     if (s.dataset.act === 'pickSel' && s.value) {
       s.blur();
+      if (!S.me) { toast(ERRORS.ENTRE_PRIMEIRO, true); go('convite'); return; }
       await g('set_pick', { p_event: s.dataset.ev, p_choice: s.value }, 'Palpite registrado 🎯');
     }
     if (s.dataset.act === 'admResult') {
