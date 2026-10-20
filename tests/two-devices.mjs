@@ -80,6 +80,24 @@ await A.fill('#itQty', '5 sacos');
 await A.getByRole('button', { name: 'Salvar' }).click();
 await B.locator('.item', { hasText: '5 sacos' }).waitFor({ timeout: 25000 });
 ok('A editou quantidade e B viu "5 sacos"');
+
+// Rascunho não some quando chega atualização de outro aparelho
+await A.fill('#itName', 'Rascunho de A');
+await A.locator('h2.sec').click(); // tira o foco do campo
+await B.fill('#itName', 'Carvão');
+await B.getByRole('button', { name: 'Adicionar' }).click();
+await A.locator('.item', { hasText: 'Carvão' }).waitFor({ timeout: 25000 });
+if ((await A.inputValue('#itName')) !== 'Rascunho de A') throw new Error('rascunho de A foi apagado');
+ok('Rascunho de A sobreviveu à atualização vinda de B');
+
+// Enter repetido não duplica
+await A.fill('#itName', 'Limão');
+await A.locator('#itName').press('Enter');
+await A.locator('#itName').press('Enter').catch(() => {});
+await A.waitForTimeout(2500);
+const limoes = await A.locator('.item', { hasText: 'Limão' }).count();
+if (limoes !== 1) throw new Error(`Enter duplicou: ${limoes} itens`);
+ok('Enter duas vezes criou só 1 item');
 await A.screenshot({ path: `${SHOTS}/2-levar.png`, fullPage: true });
 
 // Agenda
@@ -107,6 +125,9 @@ await A.locator('[data-act=pick][data-ev=classico][data-v=Barcelona].on').waitFo
 await A.selectOption('select[data-ev="f1-eua"]', 'Gabriel Bortoleto');
 await toastHas(A, 'Palpite registrado');
 ok('Palpites registrados e editados (1 por pessoa por evento)');
+if (await B.getByText('Ana: Barcelona').count()) throw new Error('B viu o palpite de A antes do fechamento');
+await B.locator('.card', { hasText: 'Quem vence? Ou dá empate?' }).getByText('2 palpite(s)').waitFor({ timeout: 25000 });
+ok('B vê só a contagem (2 palpites), não a escolha de A');
 
 // TV
 await tab(A, 'TV');

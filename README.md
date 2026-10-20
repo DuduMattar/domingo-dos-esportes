@@ -23,7 +23,7 @@ Custo zero: site estático no **GitHub Pages** e dados no **Supabase Free**.
 ## Publicar (cerca de 10 minutos)
 
 1. **Supabase** (grátis, sem cartão): crie uma conta em https://supabase.com e um projeto novo. Anote a senha do banco; ela não é usada no app.
-2. **Banco**: no painel, abra **SQL Editor**, cole todo o conteúdo de [supabase/schema.sql](supabase/schema.sql) e clique em **Run**.
+2. **Banco**: no painel, abra **SQL Editor**, cole todo o conteúdo de [supabase/schema.sql](supabase/schema.sql) e clique em **Run**. Projeto criado antes de 20/10? Rode também [supabase/migration-2026-10-20.sql](supabase/migration-2026-10-20.sql). Ela pode ser rodada mais de uma vez.
 3. **Seu usuário de organizador**:
    - Vá em **Authentication → Users → Add user → Create new user**, informe e-mail e senha forte e marque "Auto confirm".
    - Depois, no SQL Editor:
@@ -58,7 +58,8 @@ Custo zero: site estático no **GitHub Pages** e dados no **Supabase Free**.
   - O projeto **pausa após 7 dias sem uso**. Reativar é grátis, pelo painel.
   - Os limites (500 MB de banco, 200 conexões em tempo real simultâneas) sobram para uma turma.
 - **GitHub Pages** grátis exige repositório público. O código fica visível, mas não contém segredos.
-- **Tempo real**: as mudanças aparecem em segundos. Se a conexão em tempo real cair, o app recarrega os dados a cada 20 s.
+- **Tempo real**: as mudanças aparecem em segundos. Se a conexão em tempo real cair, o app recarrega os dados a cada 20 s. Se o servidor não responder, aparece um aviso com a hora da última atualização e um botão "Tentar de novo".
+- **Palpites**: os palpites dos outros só ficam visíveis depois que o evento fecha. Isso é garantido pelo banco, não só pela tela. Antes disso aparece apenas quantas pessoas palpitaram.
 - **Sem placar ao vivo, sem transmissão embutida e sem apostas.** Resultados são lançados à mão pelo organizador.
 
 ## Dados da agenda (conferidos em 20/10/2026)

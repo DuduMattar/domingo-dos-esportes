@@ -39,6 +39,7 @@ const ERRORS = {
   SOMENTE_ORGANIZADOR: 'Só o organizador pode fazer isso.',
   MESMO_REGISTRO: 'Escolha dois registros diferentes.',
   TOKEN_INVALIDO: 'Problema de identificação do aparelho. Recarregue a página.',
+  INSCRICOES_FECHADAS: 'O organizador fechou as inscrições de nomes novos. Fala com ele.',
 };
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -57,8 +58,9 @@ function toLocalInput(iso) {
 }
 const fromLocalInput = (v) => (v ? `${v}:00${BR}` : '');
 
+const nowMs = () => Date.now() + (S.skew || 0); // relógio do servidor, não do celular
 function untilText(iso) {
-  const ms = new Date(iso) - Date.now();
+  const ms = new Date(iso) - nowMs();
   if (ms <= 0) return null;
   const m = Math.floor(ms / 60000);
   const d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
@@ -97,8 +99,8 @@ function toast(msg, err = false) {
 // Estado
 // ---------------------------------------------------------------------
 const S = {
-  settings: {}, participants: [], events: [], items: [], picks: [], polls: [], votes: [], board: [],
-  me: null, admin: false, session: null,
+  settings: {}, participants: [], events: [], items: [], picks: [], pickCounts: {}, polls: [], votes: [], board: [],
+  me: null, admin: false, session: null, skew: 0, netError: false, lastOk: null, drafts: {},
   tab: 'convite', filter: pref.get('filter', 'todos'), editItem: null, ready: false,
 };
 const TOKEN = deviceToken();
@@ -108,28 +110,48 @@ const meP = () => S.participants.find((p) => p.id === S.me) || null;
 const nameOf = (id) => S.participants.find((p) => p.id === id)?.name ?? '—';
 const ev = (id) => S.events.find((e) => e.id === id);
 
+let loadSeq = 0;
 async function load() {
+  const seq = ++loadSeq;
   const q = (t, order) => {
     let x = sb.from(t).select('*');
     if (order) x = x.order(order);
     return x;
   };
-  const [st, pa, evs, it, pk, pl, vo, bd, who] = await Promise.all([
+  const all = [
     q('settings').maybeSingle(), q('participants', 'name'), q('events', 'sort'), q('items', 'created_at'),
-    q('picks'), q('tv_polls', 'id'), q('tv_votes'), q('leaderboard'),
-    sb.rpc('whoami', { p_token: TOKEN }),
-  ]);
-  const err = [st, pa, evs, it, pk, pl, vo, bd, who].find((r) => r.error);
+    sb.rpc('visible_picks', { p_token: TOKEN }), sb.rpc('pick_counts'), q('tv_polls', 'id'), q('tv_votes'),
+    q('leaderboard'), sb.rpc('whoami', { p_token: TOKEN }), sb.rpc('server_now'),
+  ];
+  const sent = Date.now();
+  const res = await Promise.all(all);
+  if (seq !== loadSeq) return; // chegou uma resposta mais nova; descarta esta
+  // Banco ainda sem a migração de 20/10 (funções inexistentes): usa o caminho antigo.
+  const missing = (r) => r.error?.code === 'PGRST202';
+  if (missing(res[4])) res[4] = await q('picks');
+  if (missing(res[5])) res[5] = { data: Object.entries((res[4].data || []).reduce((m, p) => ({ ...m, [p.event_id]: (m[p.event_id] || 0) + 1 }), {})).map(([event_id, n]) => ({ event_id, n })) };
+  if (missing(res[10])) res[10] = { data: new Date().toISOString() };
+  const err = res.find((r) => r.error);
   if (err) throw err.error;
+  const [st, pa, evs, it, pk, pc, pl, vo, bd, who, sn] = res.map((r) => r.data);
   Object.assign(S, {
-    settings: st.data || {}, participants: pa.data, events: evs.data, items: it.data, picks: pk.data,
-    polls: pl.data, votes: vo.data, board: bd.data, me: who.data, ready: true,
+    settings: st || {}, participants: pa, events: evs, items: it, picks: pk,
+    pickCounts: Object.fromEntries(pc.map((r) => [r.event_id, Number(r.n)])),
+    polls: pl, votes: vo, board: bd, me: who, ready: true,
+    skew: new Date(sn) - (sent + Date.now()) / 2, netError: false, lastOk: Date.now(),
   });
   render();
 }
 
+function safeLoad() {
+  return load().catch((e) => {
+    console.error(e);
+    S.netError = true;
+    if (S.ready) render(); else vBootError(e);
+  });
+}
 let loadTimer;
-const reload = () => { clearTimeout(loadTimer); loadTimer = setTimeout(() => load().catch(console.error), 300); };
+const reload = () => { clearTimeout(loadTimer); loadTimer = setTimeout(safeLoad, 300); };
 
 async function call(fn, args = {}, okMsg) {
   const { data, error } = await sb.rpc(fn, args);
@@ -139,7 +161,8 @@ async function call(fn, args = {}, okMsg) {
     throw error;
   }
   if (okMsg) toast(okMsg);
-  await load();
+  if (saveScope) dropScope(saveScope);
+  await safeLoad();
   return data;
 }
 const g = (fn, args, ok) => call(fn, { p_token: TOKEN, ...args }, ok);
@@ -147,6 +170,32 @@ const g = (fn, args, ok) => call(fn, { p_token: TOKEN, ...args }, ok);
 // ---------------------------------------------------------------------
 // Render
 // ---------------------------------------------------------------------
+// Rascunhos: valores alterados e ainda não salvos sobrevivem a qualquer redesenho.
+let saveScope = null;
+const scopeOf = (el) => el?.closest?.('[data-scope]')?.dataset.scope || null;
+const fieldKey = (el) => `${scopeOf(el) || ''}|${el.id || el.name || ''}${el.type === 'checkbox' && el.name === 'ev' ? ':' + el.value : ''}`;
+function dropScope(scope) { for (const k of Object.keys(S.drafts)) if (k.startsWith(scope + '|')) delete S.drafts[k]; }
+function isDirty(el) {
+  if (el.type === 'checkbox') return el.checked !== el.defaultChecked;
+  if (el.tagName === 'SELECT') return el.value !== ([...el.options].find((o) => o.defaultSelected) || el.options[0])?.value;
+  return el.value !== el.defaultValue;
+}
+function collectDrafts() {
+  for (const el of $$('#view [data-scope] input, #view [data-scope] textarea, #view [data-scope] select')) {
+    if (el.type === 'password' || (saveScope && scopeOf(el) === saveScope)) continue;
+    const k = fieldKey(el);
+    if (isDirty(el)) S.drafts[k] = el.type === 'checkbox' ? el.checked : el.value;
+    else delete S.drafts[k];
+  }
+}
+function applyDrafts() {
+  for (const el of $$('#view [data-scope] input, #view [data-scope] textarea, #view [data-scope] select')) {
+    const k = fieldKey(el);
+    if (!(k in S.drafts)) continue;
+    if (el.type === 'checkbox') el.checked = S.drafts[k]; else el.value = S.drafts[k];
+  }
+}
+
 let pendingRender = false;
 function render(force = false) {
   // Não apaga o que a pessoa está digitando quando chega atualização de outro aparelho.
@@ -158,8 +207,23 @@ function render(force = false) {
   pendingRender = false;
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
   const views = { convite: vConvite, agenda: vAgenda, levar: vLevar, palpites: vPalpites, tv: vTV, admin: vAdmin };
-  const html = (views[S.tab] || vConvite)() + vFooter();
-  if (html !== lastHtml) { $('#view').innerHTML = html; lastHtml = html; }
+  const html = vNet() + (views[S.tab] || vConvite)() + vFooter();
+  if (html !== lastHtml) {
+    collectDrafts();
+    $('#view').innerHTML = html;
+    lastHtml = html;
+    applyDrafts();
+  }
+}
+
+function vNet() {
+  if (!S.netError) return '';
+  const when = S.lastOk ? new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, hour: '2-digit', minute: '2-digit' }).format(new Date(S.lastOk)) : '—';
+  return `<div class="net">⚠️ Sem conexão com o servidor. Dados de ${when}. <button class="btn sm" data-act="retry">Tentar de novo</button></div>`;
+}
+function vBootError(e) {
+  $('#view').innerHTML = `<div class="card">Não consegui carregar os dados. Verifique a conexão.<br><span class="tiny muted">${esc(e.message)}</span>
+    <button class="btn primary" style="width:100%;margin-top:12px" data-act="retry">Tentar de novo</button></div>`;
 }
 let lastHtml = '';
 document.addEventListener('focusout', () => setTimeout(() => pendingRender && render(), 50));
@@ -188,12 +252,14 @@ function vConvite() {
   </div>
   ${s.notes ? `<div class="card small">${esc(s.notes)}</div>` : ''}
 
-  <div class="card glow">
+  <div class="card glow" data-scope="rsvp">
     <h3>${me ? `E aí, ${esc(me.name)}! Mudou de ideia?` : 'Vai colar?'}</h3>
     <p class="muted small">${me ? 'Sua resposta fica salva neste aparelho. Dá para trocar quando quiser.' : 'Sem cadastro: só seu nome. Use o nome que a turma conhece.'}</p>
     <input class="field" id="rsvpName" maxlength="40" autocomplete="name" placeholder="Seu nome" value="${esc(me?.name || pref.get('lastName', ''))}">
+    <p class="tiny muted" style="margin:6px 0 0">Use nome e sobrenome ou apelido. Abra sempre neste mesmo navegador.</p>
+    ${!me && s.signups_open === false ? '<p class="small" style="color:var(--amber)">O organizador fechou as inscrições de nomes novos.</p>' : ''}
     <div class="rsvp">
-      ${Object.entries(RSVP).map(([k, r]) => `<button class="btn ${k} ${me?.rsvp === k ? 'on' : ''}" data-act="rsvp" data-v="${k}"><span>${r.emoji}</span>${r.label}</button>`).join('')}
+      ${Object.entries(RSVP).map(([k, r]) => `<button class="btn ${k} ${me?.rsvp === k ? 'on' : ''}" data-act="rsvp" data-v="${k}" ${!me && s.signups_open === false ? 'disabled' : ''}><span>${r.emoji}</span>${r.label}</button>`).join('')}
     </div>
     ${me ? `
     <button class="toggle ${me.plays_beach ? 'on' : ''}" data-act="beach">
@@ -218,7 +284,8 @@ function vConvite() {
 function beachWhen() {
   const b = ev('beach');
   if (!b) return '';
-  const when = b.starts_at ? fmtTime(b.starts_at) + (b.ends_at ? '–' + fmtTime(b.ends_at) : '') : 'Horário a confirmar';
+  let when = b.starts_at ? fmtTime(b.starts_at) + (b.ends_at ? '–' + fmtTime(b.ends_at) : '') : 'Horário a confirmar';
+  if (b.time_kind === 'proposto') when += ' (proposto)';
   return [when, b.subtitle].filter(Boolean).join(' · ');
 }
 
@@ -253,7 +320,7 @@ function timeLabel(e) {
   if (!e.starts_at || e.time_kind === 'a_confirmar') return { t: 'A confirmar', k: '' };
   const t = fmtTime(e.starts_at);
   const end = e.ends_at && e.sport === 'turma' ? `–${fmtTime(e.ends_at)}` : '';
-  return { t: t + end, k: e.time_kind === 'nao_antes_de' ? 'não antes de' : '' };
+  return { t: t + end, k: { nao_antes_de: 'não antes de', proposto: 'proposto' }[e.time_kind] || '' };
 }
 
 function evCard(e) {
@@ -268,6 +335,7 @@ function evCard(e) {
     <div class="ev-head"><div class="ev-sport">${sp.emoji} ${sp.label}</div>
       <div class="ev-time">${k ? `<small>${k}</small>` : ''}${esc(t)}</div></div>
     <h3>${esc(e.title)}</h3>${e.subtitle ? `<div class="sub">${esc(e.subtitle)}</div>` : ''}
+    ${e.time_kind === 'proposto' ? '<div class="watch"><span class="badge amber">⏳ Proposto — aguardando confirmação</span></div>' : ''}
     ${watch}
     ${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}
     ${beach}
@@ -293,7 +361,7 @@ function vAgenda() {
     const clash = sports.length >= 2;
     const poll = clash && S.polls.find((p) => sports.some((e) => p.event_ids.includes(e.id)));
     return `<div class="slot"><span class="t">${g.start ? fmtTime(g.start) : 'Sem horário'}</span>
-      ${clash ? `<span class="badge hot">⚡ ${sports.length} ao mesmo tempo</span>` : ''}
+      ${clash ? `<span class="badge hot">⚡ ${sports.length} começam juntos</span>` : ''}
       ${poll ? `<a class="badge" href="#tv" data-tab-link="tv">📺 Vote na TV →</a>` : ''}</div>
       ${g.events.map(evCard).join('')}`;
   }).join('');
@@ -306,7 +374,7 @@ function vLevar() {
   const me = meP();
   const edit = S.editItem && S.items.find((i) => i.id === S.editItem);
   const form = me ? `
-    <div class="card glow">
+    <div class="card glow" data-scope="item">
       <h3>${edit ? '✏️ Editar item' : '➕ Eu levo…'}</h3>
       <input class="field" id="itName" maxlength="60" placeholder="Ex.: 2 sacos de gelo, farofa, cerveja" value="${esc(edit?.name || '')}">
       <div class="row" style="margin-top:8px">
@@ -322,7 +390,7 @@ function vLevar() {
     const its = S.items.filter((i) => i.category === k);
     if (!its.length) return '';
     return `<div class="cat"><h4>${c.emoji} ${c.label} · ${its.length}</h4>
-      ${its.map((i) => `<div class="item"><div class="grow"><div class="nm">${esc(i.name)}</div><div class="muted tiny">${esc(nameOf(i.participant_id))}</div></div>
+      ${its.map((i) => `<div class="item"><div class="grow"><div class="nm">${esc(i.name)}</div><div class="muted tiny">${esc(nameOf(i.participant_id))}${S.participants.find((p) => p.id === i.participant_id)?.rsvp === 'nao' ? ' · <span style="color:var(--amber)">⚠️ marcou que não vai — reconfirmar</span>' : ''}</div></div>
         ${i.qty ? `<span class="qty">${esc(i.qty)}</span>` : ''}
         ${i.participant_id === S.me ? `<button class="btn sm ghost" data-act="itemEdit" data-id="${i.id}" aria-label="Editar">✏️</button><button class="btn sm danger" data-act="itemDel" data-id="${i.id}" aria-label="Remover">✕</button>` : ''}
       </div>`).join('')}</div>`;
@@ -351,7 +419,8 @@ function vPalpites() {
     const st = pickState(e);
     const opts = e.options || [];
     const mine = S.picks.find((p) => p.event_id === e.id && p.participant_id === S.me)?.choice;
-    const all = S.picks.filter((p) => p.event_id === e.id);
+    const all = S.picks.filter((p) => p.event_id === e.id); // alheios só chegam depois do fechamento
+    const total = S.pickCounts[e.id] || 0;
     const showDist = !st.open;
     const cnt = (o) => all.filter((p) => p.choice === o).length;
     const sp = SPORTS[e.sport];
@@ -373,11 +442,11 @@ function vPalpites() {
       <h3 style="margin-top:6px">${esc(e.pick_question || 'Qual seu palpite?')}</h3>
       ${body}
       <div class="status ${st.open ? 'open' : 'closed'}">${esc(st.txt)}</div>
-      <div class="tiny muted">${mine ? `Seu palpite: <b>${esc(mine)}</b>` : (S.me ? 'Você ainda não palpitou.' : 'Confirme presença no Convite para palpitar.')} · ${all.length} palpite(s)</div>
+      <div class="tiny muted">${mine ? `Seu palpite: <b>${esc(mine)}</b>` : (S.me ? 'Você ainda não palpitou.' : 'Confirme presença no Convite para palpitar.')} · ${total} palpite(s)</div>
       ${who}
     </div>`;
   }).join('');
-  const board = [...S.board].sort((a, b) => b.points - a.points || b.picks_count - a.picks_count || a.name.localeCompare(b.name)).filter((r) => r.picks_count > 0);
+  const board = [...S.board].sort((a, b) => b.points - a.points || a.name.localeCompare(b.name)).filter((r) => r.picks_count > 0);
   let pos = 0, prev = null;
   const rows = board.map((r, i) => {
     if (r.points !== prev) { pos = i + 1; prev = r.points; }
@@ -386,7 +455,7 @@ function vPalpites() {
   return `<h2 class="sec">Palpites da turma<small>Sem apostas, só a resenha. Um palpite por pessoa em cada evento, editável até o início.</small></h2>
     ${cards}
     <h2 class="sec">Ranking</h2>
-    <div class="card"><p class="small muted" style="margin-top:0"><b>Pontuação:</b> 3 pontos por palpite certo, 0 por errado. Os palpites fecham no horário previsto de início, pelo relógio do servidor. O organizador lança os resultados oficiais à mão. Empate na pontuação: fica na frente quem palpitou em mais eventos.</p>
+    <div class="card"><p class="small muted" style="margin-top:0"><b>Pontuação:</b> 3 pontos por palpite certo, 0 por errado. Os palpites fecham no horário previsto de início, pelo relógio do servidor. O organizador lança os resultados oficiais à mão. Mesma pontuação = mesma posição. Evento cancelado, adiado ou sem vencedor é anulado: ninguém pontua.</p>
       ${rows ? `<table class="rank"><thead><tr><th>#</th><th>Nome</th><th>Acertos</th><th style="text-align:right">Pts</th></tr></thead><tbody>${rows}</tbody></table>` : '<p class="muted">Ninguém palpitou ainda.</p>'}
     </div>`;
 }
@@ -395,11 +464,11 @@ function vTV() {
   const polls = S.polls.map((p) => {
     const votes = S.votes.filter((v) => v.poll_id === p.id);
     const mine = votes.find((v) => v.participant_id === S.me)?.event_id;
-    const closed = p.locked || (p.closes_at && new Date(p.closes_at) <= new Date());
+    const closed = p.locked || (p.closes_at && new Date(p.closes_at) <= nowMs());
     const counts = p.event_ids.map((id) => votes.filter((v) => v.event_id === id).length);
     const max = Math.max(0, ...counts);
     return `<div class="card glow"><h3>${esc(p.title)}</h3>
-      <p class="muted small">${votes.length} voto(s) · ${closed ? 'votação encerrada' : 'um voto por pessoa; dá para trocar até fechar'}</p>
+      <p class="muted small">${votes.length} voto(s) · ${closed ? 'votação encerrada' : `um voto por pessoa; dá para trocar até ${p.closes_at ? 'as ' + fmtTime(p.closes_at) : 'fechar'}`} · empate: decide o organizador</p>
       ${p.event_ids.map((id, i) => {
         const e = ev(id); if (!e) return '';
         const pct = votes.length ? Math.round((counts[i] / votes.length) * 100) : 0;
@@ -443,14 +512,14 @@ function vAdmin() {
   const s = S.settings;
   const evForm = (e) => {
     const n = e ? esc(e.id) : 'new';
-    return `<div class="adm-ev" data-ev="${n}">
+    return `<div class="adm-ev" data-ev="${n}" data-scope="ev:${n}">
       ${e ? '' : '<label class="l">ID (sem espaços)</label><input class="field" name="id" placeholder="ex.: nfl-extra">'}
       <label class="l">Esporte</label><select class="field" name="sport">${Object.entries(SPORTS).map(([k, v]) => `<option value="${k}" ${e?.sport === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select>
       <label class="l">Título</label><input class="field" name="title" value="${esc(e?.title)}">
       <label class="l">Subtítulo / participantes</label><input class="field" name="subtitle" value="${esc(e?.subtitle)}">
       <div class="grid2"><div><label class="l">Início (Brasília)</label><input class="field" type="datetime-local" name="starts_at" value="${toLocalInput(e?.starts_at)}"></div>
       <div><label class="l">Fim (opcional)</label><input class="field" type="datetime-local" name="ends_at" value="${toLocalInput(e?.ends_at)}"></div></div>
-      <label class="l">Tipo de horário</label><select class="field" name="time_kind">${[['confirmado', 'Confirmado'], ['nao_antes_de', 'Não antes de'], ['a_confirmar', 'A confirmar']].map(([k, l]) => `<option value="${k}" ${e?.time_kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <label class="l">Tipo de horário</label><select class="field" name="time_kind">${[['confirmado', 'Confirmado'], ['proposto', 'Proposto'], ['nao_antes_de', 'Não antes de'], ['a_confirmar', 'A confirmar']].map(([k, l]) => `<option value="${k}" ${e?.time_kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <div class="grid2"><div><label class="l">Onde assistir (vazio = a confirmar)</label><input class="field" name="watch_label" value="${esc(e?.watch_label)}"></div>
       <div><label class="l">Link oficial</label><input class="field" name="watch_url" value="${esc(e?.watch_url)}"></div></div>
       <div class="grid2"><div><label class="l">Fonte</label><input class="field" name="source_label" value="${esc(e?.source_label)}"></div>
@@ -469,8 +538,8 @@ function vAdmin() {
       <b>${esc(e.title)}</b>
       <div class="row"><select class="field grow" data-act="admResult" data-ev="${esc(e.id)}"><option value="">— sem resultado —</option>${(e.options || []).map((o) => `<option ${e.result === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>
       <button class="btn sm ${e.picks_locked ? 'primary' : ''}" data-act="admLock" data-ev="${esc(e.id)}" data-v="${e.picks_locked ? '0' : '1'}">${e.picks_locked ? '🔒 Travado' : '🔓 Travar'}</button></div>
-      <span class="tiny muted">${S.picks.filter((p) => p.event_id === e.id).length} palpite(s)</span></div>`).join('');
-  const people = S.participants.map((p) => `<div class="adm-row" data-p="${p.id}">
+      <span class="tiny muted">${S.pickCounts[e.id] || 0} palpite(s)</span></div>`).join('');
+  const people = S.participants.map((p) => `<div class="adm-row" data-p="${p.id}" data-scope="p:${p.id}">
       <input class="field" name="name" value="${esc(p.name)}">
       <div class="row"><select class="field grow" name="rsvp">${Object.entries(RSVP).map(([k, r]) => `<option value="${k}" ${p.rsvp === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>
       <label class="tiny"><input type="checkbox" name="beach" ${p.plays_beach ? 'checked' : ''}> beach</label></div>
@@ -484,7 +553,7 @@ function vAdmin() {
     </div>`).join('');
   const polls = [...S.polls, null].map((p) => {
     const id = p ? esc(p.id) : 'new';
-    return `<div class="adm-row adm-poll" data-poll="${id}">
+    return `<div class="adm-row adm-poll" data-poll="${id}" data-scope="poll:${id}">
       ${p ? '' : '<b>Nova votação</b><input class="field" name="id" placeholder="ID, ex.: tv-21h">'}
       <input class="field" name="title" value="${esc(p?.title)}" placeholder="Título">
       <div class="checks">${S.events.filter((e) => e.sport !== 'turma').map((e) => `<label><input type="checkbox" name="ev" value="${esc(e.id)}" ${p?.event_ids.includes(e.id) ? 'checked' : ''}> ${esc(e.title)}</label>`).join('')}</div>
@@ -494,7 +563,11 @@ function vAdmin() {
       ${p ? `<button class="btn sm danger" data-act="admPollDel" data-poll="${id}">Apagar</button>` : ''}</div></div>`;
   }).join('');
   return `<h2 class="sec">Organizador<small>Logado como ${esc(S.session.user.email)} · <a href="#" data-act="admLogout">sair</a></small></h2>
-    <details class="adm" open><summary>📍 Local, horário e duplas</summary>
+    <div class="card" style="display:flex;gap:10px;align-items:center;justify-content:space-between">
+      <span><b>Inscrições de nomes novos</b><br><span class="small muted">${s.signups_open === false ? 'Fechadas: só quem já está na lista pode mudar a resposta.' : 'Abertas.'}</span></span>
+      <button class="btn sm ${s.signups_open === false ? 'primary' : ''}" data-act="admSignups" data-v="${s.signups_open === false ? '1' : '0'}">${s.signups_open === false ? 'Reabrir' : 'Fechar'}</button>
+    </div>
+    <details class="adm" open data-scope="settings"><summary>📍 Local, horário e duplas</summary>
       <label class="l">Local</label><input class="field" id="sPlace" value="${esc(s.place === 'A definir' ? '' : s.place)}" placeholder="A definir">
       <label class="l">Link do mapa (opcional)</label><input class="field" id="sPlaceUrl" value="${esc(s.place_url)}">
       <label class="l">Horário</label><input class="field" id="sTime" value="${esc(s.meet_time === 'A definir' ? '' : s.meet_time)}" placeholder="A definir (ex.: a partir das 12h30)">
@@ -569,6 +642,8 @@ const actions = {
   itemCancel() { S.editItem = null; render(true); },
   async itemDel(b) { if (armed('i' + b.dataset.id, b)) await g('remove_item', { p_id: b.dataset.id }, 'Item removido'); },
   async pick(b) { await g('set_pick', { p_event: b.dataset.ev, p_choice: b.dataset.v }, 'Palpite registrado 🎯'); },
+  async retry() { await safeLoad(); if (!S.netError) toast('Atualizado ✅'); },
+  async admSignups(b) { await call('admin_set_signups', { p_open: b.dataset.v === '1' }, b.dataset.v === '1' ? 'Inscrições reabertas' : 'Inscrições fechadas'); },
   async tv(b) { await g('cast_tv_vote', { p_poll: b.dataset.poll, p_event: b.dataset.v }, 'Voto computado 📺'); },
 
   async admLogin() {
@@ -631,7 +706,8 @@ document.addEventListener('click', async (ev) => {
   ev.preventDefault();
   if (b.disabled || b.dataset.busy) return;
   b.dataset.busy = '1';
-  try { await actions[b.dataset.act](b); } catch (e) { console.warn(e); } finally { delete b.dataset.busy; }
+  saveScope = scopeOf(b);
+  try { await actions[b.dataset.act](b); } catch (e) { console.warn(e); } finally { delete b.dataset.busy; saveScope = null; }
 });
 
 document.addEventListener('change', async (ev) => {
@@ -650,8 +726,9 @@ document.addEventListener('change', async (ev) => {
 
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Enter') return;
-  if (ev.target.id === 'itName' || ev.target.id === 'itQty') actions.itemSave();
-  if (ev.target.id === 'admPass') actions.admLogin();
+  // Enter passa pelo mesmo botão (e pela mesma trava contra envio duplo).
+  if (ev.target.id === 'itName' || ev.target.id === 'itQty') { ev.preventDefault(); $('[data-act=itemSave]')?.click(); }
+  if (ev.target.id === 'admPass') { ev.preventDefault(); $('[data-act=admLogin]')?.click(); }
 });
 
 window.addEventListener('hashchange', () => {
@@ -670,17 +747,11 @@ async function start() {
   }
   const t = location.hash.slice(1);
   if (['convite', 'agenda', 'levar', 'palpites', 'tv', 'admin'].includes(t)) S.tab = t;
-  try {
-    await refreshAdmin();
-    await load();
-  } catch (e) {
-    console.error(e);
-    $('#view').innerHTML = `<div class="card">Não consegui carregar os dados. Verifique a conexão e recarregue.<br><span class="tiny muted">${esc(e.message)}</span></div>`;
-    return;
-  }
   sb.channel('dde').on('postgres_changes', { event: '*', schema: 'public' }, reload).subscribe();
-  sb.auth.onAuthStateChange(() => setTimeout(() => refreshAdmin().then(() => render()), 0));
-  setInterval(() => document.visibilityState === 'visible' && load().catch(console.error), 20000);
+  sb.auth.onAuthStateChange(() => setTimeout(() => refreshAdmin().then(() => S.ready && render()).catch(console.error), 0));
+  setInterval(() => document.visibilityState === 'visible' && safeLoad(), 20000);
+  await refreshAdmin().catch(console.error);
+  await safeLoad();
   setInterval(() => S.tab === 'palpites' && render(), 30000);
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && reload());
 }

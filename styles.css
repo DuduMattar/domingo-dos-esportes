@@ -33,6 +33,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 a { color: var(--green); }
 
 main { max-width: 560px; margin: 0 auto; padding: 16px 16px 24px; }
+.net { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; background: rgba(255, 196, 77, .12); border: 1px solid rgba(255, 196, 77, .5); color: var(--amber); border-radius: 12px; padding: 10px 12px; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 .boot { padding: 40vh 0; text-align: center; color: var(--muted); }
 
 /* ---------- Hero ---------- */
@@ -83,7 +84,7 @@ h3 { margin: 0 0 6px; font-size: 17px; }
 .tiny { font-size: 12px; }
 
 /* ---------- Forms & buttons ---------- */
-.field { width: 100%; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; outline: none; min-height: 48px; }
+.field { width: 100%; background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; outline: none; min-height: 48px; font-size: 16px; } /* 16px evita zoom no iPhone */
 .field:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(34, 227, 107, .18); }
 textarea.field { min-height: 80px; resize: vertical; }
 label.l { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 10px 0 6px; letter-spacing: .04em; }
