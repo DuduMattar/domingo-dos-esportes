@@ -68,8 +68,8 @@ Custo zero: site estático no **GitHub Pages** e dados no **Supabase Free**.
 | Final ATP 250 Almaty | não antes de 07:00 | [ATP Tour](https://www.atptour.com/en/news/almaty-atp-250-2026-history-draw-schedule) |
 | 2º turno: votação | 08:00–17:00 | [TSE](https://www.tse.jus.br/eleicoes/calendario-eleitoral) |
 | NFL Steelers x Saints (Paris) | 10:30 | [NFL.com](https://www.nfl.com/schedules/2026/by-week/reg-7) |
+| Beach tennis da turma | 11:00–13:00 | Definido pela turma |
 | NFL, 7 jogos | 14:00 | NFL.com |
-| Beach tennis da turma | 14:30–16:45 | Definido pela turma |
 | F1, GP dos EUA | 17:00 | [Formula1.com](https://www.formula1.com/en/latest/article/formula-1-msc-cruises-united-states-grand-prix-2026.2u6li2pzNhPzL3TSYaagrm) |
 | Barcelona x Real Madrid | 17:00 | [FC Barcelona](https://www.fcbarcelona.es/es/noticias/4570226/el-horario-del-clasico-de-liga-en-el-spotify-camp-nou-confirmado) |
 | NFL, jogos da tarde | 17:05 / 17:25 | NFL.com |

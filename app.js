@@ -197,7 +197,7 @@ function vConvite() {
     </div>
     ${me ? `
     <button class="toggle ${me.plays_beach ? 'on' : ''}" data-act="beach">
-      <span class="sw"></span><span><b>🏖️ Vou jogar beach tennis</b><br><span class="muted small">14h30–16h45 · Clube Hípico de Santo Amaro</span></span>
+      <span class="sw"></span><span><b>🏖️ Vou jogar beach tennis</b><br><span class="muted small">${beachWhen()}</span></span>
     </button>` : ''}
   </div>
 
@@ -213,6 +213,13 @@ function vConvite() {
   </div>
 
   <a class="btn wa" style="display:block;text-align:center;text-decoration:none;margin-top:12px" target="_blank" rel="noopener" href="${waLink()}">Chamar a galera no WhatsApp</a>`;
+}
+
+function beachWhen() {
+  const b = ev('beach');
+  if (!b) return '';
+  const when = b.starts_at ? fmtTime(b.starts_at) + (b.ends_at ? '–' + fmtTime(b.ends_at) : '') : 'Horário a confirmar';
+  return [when, b.subtitle].filter(Boolean).join(' · ');
 }
 
 function waLink() {
