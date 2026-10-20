@@ -14,6 +14,7 @@ const SPORTS = {
   tenis: { label: 'Tênis', emoji: '🎾' },
   nfl: { label: 'NFL', emoji: '🏈' },
   turma: { label: 'Turma', emoji: '🎉' },
+  eleicao: { label: 'Eleição', emoji: '🗳️' },
 };
 const CATS = {
   comida: { label: 'Comida', emoji: '🍖' },
@@ -355,7 +356,7 @@ function beachBlock() {
 
 function vAgenda() {
   const f = S.filter;
-  const list = S.events.filter((e) => f === 'todos' || e.sport === f);
+  const list = S.events.filter((e) => e.in_agenda !== false && (f === 'todos' || e.sport === f));
   const groups = slots(list).map((g) => {
     const sports = g.events.filter((e) => e.sport !== 'turma');
     const clash = sports.length >= 2;
@@ -414,8 +415,13 @@ function pickState(e) {
 }
 
 function vPalpites() {
-  const evs = S.events.filter((e) => e.pick_enabled);
+  const t0 = (e) => (e.starts_at ? new Date(e.starts_at).getTime() : Infinity);
+  const evs = S.events.filter((e) => e.pick_enabled).sort((a, b) => t0(a) - t0(b) || a.sort - b.sort);
+  let lastSlot = null;
   const cards = evs.map((e) => {
+    const slot = e.starts_at ? fmtTime(e.starts_at) : 'A confirmar';
+    const head = slot !== lastSlot ? `<div class="slot"><span class="t">${slot}</span></div>` : '';
+    lastSlot = slot;
     const st = pickState(e);
     const opts = e.options || [];
     const mine = S.picks.find((p) => p.event_id === e.id && p.participant_id === S.me)?.choice;
@@ -425,7 +431,7 @@ function vPalpites() {
     const cnt = (o) => all.filter((p) => p.choice === o).length;
     const sp = SPORTS[e.sport];
     let body;
-    if (!opts.length) body = '<p class="muted small" style="margin-top:10px">Opções liberadas quando o organizador cadastrar os finalistas.</p>';
+    if (!opts.length) body = `<p class="muted small" style="margin-top:10px">Opções liberadas quando o organizador cadastrar ${e.id === 'beach' ? 'as duplas' : 'os finalistas'}.</p>`;
     else if (opts.length > 6) {
       body = `<select class="field" style="margin-top:12px" data-act="pickSel" data-ev="${esc(e.id)}" ${st.open ? '' : 'disabled'}>
         <option value="">— escolha —</option>${opts.map((o) => `<option ${mine === o ? 'selected' : ''} value="${esc(o)}">${esc(o)}${showDist ? ` (${cnt(o)})` : ''}${e.result === o ? ' ✅' : ''}</option>`).join('')}</select>`;
@@ -437,7 +443,7 @@ function vPalpites() {
       }).join('')}</div>`;
     }
     const who = showDist && all.length ? `<div class="note tiny muted">${all.map((p) => `${esc(nameOf(p.participant_id))}: ${esc(p.choice)}`).join(' · ')}</div>` : '';
-    return `<div class="card">
+    return `${head}<div class="card">
       <div class="ev-sport">${sp.emoji} ${esc(e.title)}</div>
       <h3 style="margin-top:6px">${esc(e.pick_question || 'Qual seu palpite?')}</h3>
       ${body}
@@ -536,7 +542,8 @@ function vAdmin() {
       <div class="grid2"><div><label class="l">Conferido em</label><input class="field" type="date" name="checked_at" value="${esc(e?.checked_at)}"></div>
       <div><label class="l">Ordem</label><input class="field" type="number" name="sort" value="${esc(e?.sort ?? 99)}"></div></div>
       <label class="l">Observação</label><textarea class="field" name="note">${esc(e?.note)}</textarea>
-      <div class="checks"><label><input type="checkbox" name="pick_enabled" ${e?.pick_enabled ? 'checked' : ''}> Tem palpite</label></div>
+      <div class="checks"><label><input type="checkbox" name="pick_enabled" ${e?.pick_enabled ? 'checked' : ''}> Tem palpite</label>
+        <label><input type="checkbox" name="in_agenda" ${e?.in_agenda === false ? '' : 'checked'}> Mostrar na agenda</label></div>
       <label class="l">Pergunta do palpite</label><input class="field" name="pick_question" value="${esc(e?.pick_question)}">
       <label class="l">Opções (uma por linha)</label><textarea class="field" name="options">${esc((e?.options || []).join('\n'))}</textarea>
       <div class="row" style="margin-top:10px"><button class="btn primary grow" data-act="admEvSave" data-ev="${n}">Salvar evento</button>
@@ -565,7 +572,7 @@ function vAdmin() {
     return `<div class="adm-row adm-poll" data-poll="${id}" data-scope="poll:${id}">
       ${p ? '' : '<b>Nova votação</b><input class="field" name="id" placeholder="ID, ex.: tv-21h">'}
       <input class="field" name="title" value="${esc(p?.title)}" placeholder="Título">
-      <div class="checks">${S.events.filter((e) => e.sport !== 'turma').map((e) => `<label><input type="checkbox" name="ev" value="${esc(e.id)}" ${p?.event_ids.includes(e.id) ? 'checked' : ''}> ${esc(e.title)}</label>`).join('')}</div>
+      <div class="checks">${S.events.filter((e) => e.sport !== 'turma' && e.in_agenda !== false).map((e) => `<label><input type="checkbox" name="ev" value="${esc(e.id)}" ${p?.event_ids.includes(e.id) ? 'checked' : ''}> ${esc(e.title)}</label>`).join('')}</div>
       <label class="l">Fecha em (opcional)</label><input class="field" type="datetime-local" name="closes_at" value="${toLocalInput(p?.closes_at)}">
       <div class="checks"><label><input type="checkbox" name="locked" ${p?.locked ? 'checked' : ''}> Encerrada</label></div>
       <div class="row"><button class="btn sm primary" data-act="admPollSave" data-poll="${id}">Salvar votação</button>
@@ -681,6 +688,7 @@ const actions = {
       source_label: f('source_label').value.trim(), source_url: f('source_url').value.trim(), checked_at: f('checked_at').value,
       note: f('note').value.trim(), pick_enabled: f('pick_enabled').checked, pick_question: f('pick_question').value.trim(),
       options: f('options').value.split('\n').map((x) => x.trim()).filter(Boolean), sort: Number(f('sort').value) || 0,
+      in_agenda: f('in_agenda').checked,
     } }, 'Evento salvo');
   },
   async admEvDel(b) { if (armed('e' + b.dataset.ev, b)) await call('admin_delete_event', { p_id: b.dataset.ev }, 'Evento apagado'); },
