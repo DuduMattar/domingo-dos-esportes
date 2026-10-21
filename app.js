@@ -385,7 +385,7 @@ function vAgenda() {
     const clash = sports.length >= 2;
     const poll = clash && S.polls.find((p) => sports.some((e) => p.event_ids.includes(e.id)));
     return `<div class="slot"><span class="t">${g.start ? fmtTime(g.start) : 'Sem horário'}</span>
-      ${clash ? `<span class="badge hot">⚡ ${sports.length} começam juntos</span>` : ''}
+      ${clash ? `<span class="badge hot">⚡ ${sports.length} na mesma faixa</span>` : ''}
       ${poll ? `<a class="badge" href="#tv" data-tab-link="tv">📺 Vote na TV →</a>` : ''}</div>
       ${g.events.map(evCard).join('')}`;
   }).join('');
