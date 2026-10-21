@@ -349,8 +349,22 @@ function evCard(e) {
     ${watch}
     ${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}
     ${beach}
+    ${factsBlock(e)}
     ${e.source_label ? `<div class="src">Fonte: ${sUrl ? `<a href="${esc(sUrl)}" target="_blank" rel="noopener">${esc(e.source_label)}</a>` : esc(e.source_label)}${e.checked_at ? ` · conferido em ${fmtDate(e.checked_at)}` : ''}</div>` : ''}
   </article>`;
+}
+
+// Ficha do evento: fatos levantados antes, cada um com fonte. Não é placar ao vivo.
+function factsBlock(e, where = 'a') {
+  const facts = e.facts || [];
+  if (!facts.length) return '';
+  const dates = facts.map((f) => f.date).filter(Boolean).sort();
+  return `<details class="facts" data-key="fact:${where}:${esc(e.id)}"><summary>📊 Ficha do evento</summary><ul>
+    ${facts.map((f) => {
+      const u = safeUrl(f.url);
+      return `<li>${esc(f.text)}${f.source ? ` <span class="src-i">${u ? `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(f.source)}</a>` : esc(f.source)}</span>` : ''}</li>`;
+    }).join('')}
+  </ul><div class="tiny muted">${dates.length ? `Dados conferidos em ${fmtDate(dates[dates.length - 1])}. ` : ''}Não é placar ao vivo.</div></details>`;
 }
 
 function beachBlock() {
@@ -473,6 +487,7 @@ function vPalpites() {
       <div class="ev-sport">${sp.emoji} ${esc(e.title)}</div>
       <h3 style="margin-top:6px">${esc(e.pick_question || 'Qual seu palpite?')}</h3>
       ${body}
+      ${factsBlock(e, 'p')}
       <div class="status ${st.open ? 'open' : 'closed'}">${esc(st.txt)}</div>
       <div class="tiny muted">${mine ? `Seu palpite: <b>${esc(mine)}</b>` : (S.me ? 'Você ainda não palpitou.' : 'Confirme presença no Convite para palpitar.')} · ${total} palpite(s)</div>
       ${who || (pickerNames.length ? `<div class="note tiny muted">Já palpitaram: ${pickerNames.map(esc).join(', ')}</div>` : '')}
@@ -578,6 +593,7 @@ function vAdmin() {
         <label><input type="checkbox" name="in_agenda" ${e?.in_agenda === false ? '' : 'checked'}> Mostrar na agenda</label></div>
       <label class="l">Pergunta do palpite</label><input class="field" name="pick_question" value="${esc(e?.pick_question)}">
       <label class="l">Opções (uma por linha)</label><textarea class="field" name="options">${esc((e?.options || []).join('\n'))}</textarea>
+      <label class="l">Ficha (uma por linha: texto | fonte | link | data AAAA-MM-DD)</label><textarea class="field" name="facts" style="min-height:120px">${esc((e?.facts || []).map((f) => [f.text, f.source, f.url, f.date].map((x) => x || '').join(' | ')).join('\n'))}</textarea>
       <div class="row" style="margin-top:10px"><button class="btn primary grow" data-act="admEvSave" data-ev="${n}">Salvar evento</button>
       ${e ? `<button class="btn danger" data-act="admEvDel" data-ev="${n}">Apagar</button>` : ''}</div>
     </div>`;
@@ -748,6 +764,8 @@ const actions = {
       note: f('note').value.trim(), pick_enabled: f('pick_enabled').checked, pick_question: f('pick_question').value.trim(),
       options: f('options').value.split('\n').map((x) => x.trim()).filter(Boolean), sort: Number(f('sort').value) || 0,
       in_agenda: f('in_agenda').checked,
+      facts: f('facts').value.split('\n').map((l) => l.split('|').map((x) => x.trim())).filter((c) => c[0])
+        .map(([text, source, url, date]) => ({ text, source: source || null, url: url || null, date: date || null })),
     } }, 'Evento salvo');
   },
   async admEvDel(b) { if (armed('e' + b.dataset.ev, b)) await call('admin_delete_event', { p_id: b.dataset.ev }, 'Evento apagado'); },
