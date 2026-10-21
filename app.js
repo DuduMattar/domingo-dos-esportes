@@ -28,7 +28,8 @@ const RSVP = {
   nao: { label: 'Não vou', emoji: '😢' },
 };
 const ERRORS = {
-  NOME_EM_USO: 'Esse nome já está na lista em outro aparelho. Se é você, peça ao organizador para liberar.',
+  NOME_EM_USO: 'Esse nome já está na lista. Se é você, peça ao organizador o seu link pessoal.',
+  LINK_INVALIDO: 'Esse link pessoal não vale mais. Peça um novo ao organizador.',
   NOME_INVALIDO: 'Coloca um nome com 2 a 40 letras.',
   ENTRE_PRIMEIRO: 'Confirma sua presença no Convite primeiro (é só o nome).',
   PALPITES_ENCERRADOS: 'Palpites encerrados para esse evento.',
@@ -100,7 +101,7 @@ function toast(msg, err = false) {
 // Estado
 // ---------------------------------------------------------------------
 const S = {
-  settings: {}, participants: [], events: [], items: [], picks: [], pickCounts: {}, polls: [], votes: [], board: [],
+  settings: {}, participants: [], events: [], items: [], picks: [], pickCounts: {}, pickers: {}, links: {}, polls: [], votes: [], board: [],
   me: null, admin: false, session: null, skew: 0, netError: false, lastOk: null, drafts: {},
   tab: 'convite', filter: pref.get('filter', 'todos'), editItem: null, ready: false,
 };
@@ -122,7 +123,7 @@ async function load() {
   const all = [
     q('settings').maybeSingle(), q('participants', 'name'), q('events', 'sort'), q('items', 'created_at'),
     sb.rpc('visible_picks', { p_token: TOKEN }), sb.rpc('pick_counts'), q('tv_polls', 'id'), q('tv_votes'),
-    q('leaderboard'), sb.rpc('whoami', { p_token: TOKEN }), sb.rpc('server_now'),
+    q('leaderboard'), sb.rpc('whoami', { p_token: TOKEN }), sb.rpc('server_now'), sb.rpc('pick_people'),
   ];
   const sent = Date.now();
   const res = await Promise.all(all);
@@ -132,12 +133,15 @@ async function load() {
   if (missing(res[4])) res[4] = await q('picks');
   if (missing(res[5])) res[5] = { data: Object.entries((res[4].data || []).reduce((m, p) => ({ ...m, [p.event_id]: (m[p.event_id] || 0) + 1 }), {})).map(([event_id, n]) => ({ event_id, n })) };
   if (missing(res[10])) res[10] = { data: new Date().toISOString() };
+  if (missing(res[11])) res[11] = { data: [] }; // banco sem a migração de 21/10
   const err = res.find((r) => r.error);
   if (err) throw err.error;
-  const [st, pa, evs, it, pk, pc, pl, vo, bd, who, sn] = res.map((r) => r.data);
+  const [st, pa, evs, it, pk, pc, pl, vo, bd, who, sn, pp] = res.map((r) => r.data);
+  const pickers = {};
+  for (const r of pp) (pickers[r.event_id] ||= []).push(r.participant_id);
   Object.assign(S, {
     settings: st || {}, participants: pa, events: evs, items: it, picks: pk,
-    pickCounts: Object.fromEntries(pc.map((r) => [r.event_id, Number(r.n)])),
+    pickCounts: Object.fromEntries(pc.map((r) => [r.event_id, Number(r.n)])), pickers,
     polls: pl, votes: vo, board: bd, me: who, ready: true,
     skew: new Date(sn) - (sent + Date.now()) / 2, netError: false, lastOk: Date.now(),
   });
@@ -207,6 +211,8 @@ function render(force = false) {
   }
   pendingRender = false;
   $$('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
+  const pend = S.me ? pendingPicks().length : 0;
+  $('#tabs [data-tab=palpites]').dataset.badge = pend ? String(pend) : '';
   const views = { convite: vConvite, agenda: vAgenda, levar: vLevar, palpites: vPalpites, tv: vTV, admin: vAdmin };
   const html = vNet() + (views[S.tab] || vConvite)() + vFooter();
   if (html !== lastHtml) {
@@ -214,8 +220,11 @@ function render(force = false) {
     $('#view').innerHTML = html;
     lastHtml = html;
     applyDrafts();
+    for (const d of $$('#view details[data-key]')) if (d.dataset.key in openDetails) d.open = openDetails[d.dataset.key];
   }
 }
+const openDetails = {}; // seções abertas/fechadas sobrevivem a redesenhos
+document.addEventListener('toggle', (ev) => { const k = ev.target.dataset?.key; if (k) openDetails[k] = ev.target.open; }, true);
 
 function vNet() {
   if (!S.netError) return '';
@@ -257,7 +266,7 @@ function vConvite() {
     <h3>${me ? `E aí, ${esc(me.name)}! Mudou de ideia?` : 'Vai colar?'}</h3>
     <p class="muted small">${me ? 'Sua resposta fica salva neste aparelho. Dá para trocar quando quiser.' : 'Sem cadastro: só seu nome. Use o nome que a turma conhece.'}</p>
     <input class="field" id="rsvpName" maxlength="40" autocomplete="name" placeholder="Seu nome" value="${esc(me?.name || pref.get('lastName', ''))}">
-    <p class="tiny muted" style="margin:6px 0 0">Use nome e sobrenome ou apelido. Abra sempre neste mesmo navegador.</p>
+    <p class="tiny muted" style="margin:6px 0 0">Use nome e sobrenome ou apelido.${me ? '' : ' Já confirmou em outro celular? Peça seu link pessoal ao organizador.'}</p>
     ${!me && s.signups_open === false ? '<p class="small" style="color:var(--amber)">O organizador fechou as inscrições de nomes novos.</p>' : ''}
     <div class="rsvp">
       ${Object.entries(RSVP).map(([k, r]) => `<button class="btn ${k} ${me?.rsvp === k ? 'on' : ''}" data-act="rsvp" data-v="${k}" ${!me && s.signups_open === false ? 'disabled' : ''}><span>${r.emoji}</span>${r.label}</button>`).join('')}
@@ -414,7 +423,22 @@ function pickState(e) {
   return { open: true, txt: 'Aberto até o organizador encerrar' };
 }
 
+const openPickEvents = () => S.events.filter((e) => e.pick_enabled && (e.options || []).length && pickState(e).open);
+const pendingPicks = () => openPickEvents().filter((e) => !S.picks.some((p) => p.event_id === e.id && p.participant_id === S.me));
+
+function chargeLink() {
+  const open = openPickEvents();
+  const missing = S.participants.filter((p) => p.rsvp !== 'nao')
+    .map((p) => ({ name: p.name, n: open.filter((e) => !(S.pickers[e.id] || []).includes(p.id)).length }))
+    .filter((x) => x.n > 0).sort((a, b) => b.n - a.n);
+  if (!open.length || !missing.length) return '';
+  const text = ['🎯 *Palpites do Domingo dos Esportes*', 'Ainda faltam:', ...missing.map((x) => `• ${x.name}: ${x.n}`),
+    `Palpita aqui: ${location.origin + location.pathname}#palpites`].join('\n');
+  return `<a class="btn wa" style="display:block;text-align:center;text-decoration:none;margin-top:10px" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(text)}">Cobrar quem falta no WhatsApp (${missing.length})</a>`;
+}
+
 function vPalpites() {
+  const pending = S.me ? pendingPicks() : [];
   const t0 = (e) => (e.starts_at ? new Date(e.starts_at).getTime() : Infinity);
   const evs = S.events.filter((e) => e.pick_enabled).sort((a, b) => t0(a) - t0(b) || a.sort - b.sort);
   let lastSlot = null;
@@ -427,6 +451,8 @@ function vPalpites() {
     const mine = S.picks.find((p) => p.event_id === e.id && p.participant_id === S.me)?.choice;
     const all = S.picks.filter((p) => p.event_id === e.id); // alheios só chegam depois do fechamento
     const total = S.pickCounts[e.id] || 0;
+    const pickerNames = (S.pickers[e.id] || []).map(nameOf).sort((a, b) => a.localeCompare(b));
+    const isPending = pending.includes(e);
     const showDist = !st.open;
     const cnt = (o) => all.filter((p) => p.choice === o).length;
     const sp = SPORTS[e.sport];
@@ -443,15 +469,20 @@ function vPalpites() {
       }).join('')}</div>`;
     }
     const who = showDist && all.length ? `<div class="note tiny muted">${all.map((p) => `${esc(nameOf(p.participant_id))}: ${esc(p.choice)}`).join(' · ')}</div>` : '';
-    return `${head}<div class="card">
+    return `${head}<div class="card ${isPending ? 'pending' : ''}" id="pk-${esc(e.id)}">
       <div class="ev-sport">${sp.emoji} ${esc(e.title)}</div>
       <h3 style="margin-top:6px">${esc(e.pick_question || 'Qual seu palpite?')}</h3>
       ${body}
       <div class="status ${st.open ? 'open' : 'closed'}">${esc(st.txt)}</div>
       <div class="tiny muted">${mine ? `Seu palpite: <b>${esc(mine)}</b>` : (S.me ? 'Você ainda não palpitou.' : 'Confirme presença no Convite para palpitar.')} · ${total} palpite(s)</div>
-      ${who}
+      ${who || (pickerNames.length ? `<div class="note tiny muted">Já palpitaram: ${pickerNames.map(esc).join(', ')}</div>` : '')}
     </div>`;
   }).join('');
+  const top = !S.me ? '' : pending.length
+    ? `<div class="card glow"><h3>🎯 Faltam ${pending.length} palpite${pending.length > 1 ? 's' : ''}</h3>
+        <p class="small muted" style="margin-top:0">Os que faltam estão marcados em amarelo.</p>
+        <button class="btn primary" style="width:100%" data-act="nextPick">Ir para o próximo</button>${chargeLink()}</div>`
+    : `<div class="card"><b>✅ Você palpitou em tudo que está aberto.</b>${chargeLink()}</div>`;
   const board = [...S.board].sort((a, b) => b.points - a.points || a.name.localeCompare(b.name)).filter((r) => r.picks_count > 0);
   let pos = 0, prev = null;
   const rows = board.map((r, i) => {
@@ -460,6 +491,7 @@ function vPalpites() {
   }).join('');
   return `<h2 class="sec">Palpites da turma<small>Sem apostas, só a resenha. Um palpite por pessoa em cada evento, editável até o início.</small></h2>
     ${needJoin('palpitar')}
+    ${top}
     ${cards}
     <h2 class="sec">Ranking</h2>
     <div class="card"><p class="small muted" style="margin-top:0"><b>Pontuação:</b> 3 pontos por palpite certo, 0 por errado. Os palpites fecham no horário previsto de início, pelo relógio do servidor. O organizador lança os resultados oficiais à mão. Mesma pontuação = mesma posição. Evento cancelado, adiado ou sem vencedor é anulado: ninguém pontua.</p>
@@ -495,12 +527,12 @@ function vTV() {
 function needJoin(what) {
   if (S.me) return '';
   return `<div class="card glow"><h3>✋ Antes de ${what}, diga quem você é</h3>
-    <p class="small muted">Confirme presença no Convite (só o nome). Já confirmou? Então foi em outro navegador ou aparelho — se abriu pelo WhatsApp, abra o link no Safari/Chrome, ou vice-versa.</p>
+    <p class="small muted">Confirme presença no Convite (só o nome). Já confirmou em outro celular ou navegador? Peça ao organizador o seu <b>link pessoal</b>: ele te reconecta com seus palpites.</p>
     <button class="btn primary" style="width:100%" data-tab-link="convite">Confirmar presença</button></div>`;
 }
 
 function vFooter() {
-  return `<footer class="about"><details><summary>Sobre o app e limitações</summary><ul>
+  return `<footer class="about"><details data-key="about"><summary>Sobre o app e limitações</summary><ul>
     <li><b>Identificação:</b> não há login. Seu nome fica vinculado a este aparelho/navegador. Se trocar de celular ou limpar o navegador, peça ao organizador para liberar seu nome.</li>
     <li>Dá para alguém digitar o nome de outra pessoa antes dela — o organizador corrige registros, junta duplicados e libera nomes.</li>
     <li>Horários de Brasília. Dados de horário e transmissão conferidos nas fontes indicadas em cada card. "A confirmar" = sem fonte oficial ainda.</li>
@@ -555,15 +587,28 @@ function vAdmin() {
       <div class="row"><select class="field grow" data-act="admResult" data-ev="${esc(e.id)}"><option value="">— sem resultado —</option>${(e.options || []).map((o) => `<option ${e.result === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>
       <button class="btn sm ${e.picks_locked ? 'primary' : ''}" data-act="admLock" data-ev="${esc(e.id)}" data-v="${e.picks_locked ? '0' : '1'}">${e.picks_locked ? '🔒 Travado' : '🔓 Travar'}</button></div>
       <span class="tiny muted">${S.pickCounts[e.id] || 0} palpite(s)</span></div>`).join('');
+  const linkBox = (p) => {
+    const url = S.links[p.id];
+    if (!url) return '';
+    const msg = `Oi, ${p.name}! Seu link do Domingo dos Esportes (é só seu, não repasse): ${url}`;
+    return `<div class="row"><input class="field grow" readonly value="${esc(url)}"><button class="btn sm" data-act="admCopy" data-url="${esc(url)}">Copiar</button></div>
+      <div class="row"><a class="btn sm wa grow" style="text-align:center;text-decoration:none" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(msg)}">Mandar no WhatsApp</a>
+      <button class="btn sm danger" data-act="admLink" data-id="${p.id}" data-new="1">Gerar novo</button></div>
+      <span class="tiny muted">Gerar novo invalida o link antigo.</span>`;
+  };
   const people = S.participants.map((p) => `<div class="adm-row" data-p="${p.id}" data-scope="p:${p.id}">
       <input class="field" name="name" value="${esc(p.name)}">
       <div class="row"><select class="field grow" name="rsvp">${Object.entries(RSVP).map(([k, r]) => `<option value="${k}" ${p.rsvp === k ? 'selected' : ''}>${r.label}</option>`).join('')}</select>
       <label class="tiny"><input type="checkbox" name="beach" ${p.plays_beach ? 'checked' : ''}> beach</label></div>
       <div class="row" style="flex-wrap:wrap">
         <button class="btn sm primary" data-act="admPSave" data-id="${p.id}">Salvar</button>
-        <button class="btn sm" data-act="admPRelease" data-id="${p.id}">Liberar aparelho</button>
+        <button class="btn sm" data-act="admLink" data-id="${p.id}">🔗 Link pessoal</button>
         <button class="btn sm danger" data-act="admPDel" data-id="${p.id}">Apagar</button>
       </div>
+      ${linkBox(p)}
+      <details data-key="em:${p.id}"><summary class="tiny muted">Emergência: alguém pegou este nome?</summary>
+        <p class="tiny muted">"Desconectar aparelhos" tira este nome de todos os celulares. Até a pessoa entrar de novo (pelo link pessoal ou digitando o nome), qualquer um que digitar o nome assume o registro.</p>
+        <button class="btn sm" data-act="admPRelease" data-id="${p.id}">Desconectar aparelhos</button></details>
       <div class="row"><select class="field grow" name="merge"><option value="">Juntar este registro em…</option>${S.participants.filter((x) => x.id !== p.id).map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('')}</select>
       <button class="btn sm" data-act="admPMerge" data-id="${p.id}">Juntar</button></div>
     </div>`).join('');
@@ -583,7 +628,7 @@ function vAdmin() {
       <span><b>Inscrições de nomes novos</b><br><span class="small muted">${s.signups_open === false ? 'Fechadas: só quem já está na lista pode mudar a resposta.' : 'Abertas.'}</span></span>
       <button class="btn sm ${s.signups_open === false ? 'primary' : ''}" data-act="admSignups" data-v="${s.signups_open === false ? '1' : '0'}">${s.signups_open === false ? 'Reabrir' : 'Fechar'}</button>
     </div>
-    <details class="adm" open data-scope="settings"><summary>📍 Local, horário e duplas</summary>
+    <details class="adm" open data-key="settings" data-scope="settings"><summary>📍 Local, horário e duplas</summary>
       <label class="l">Local</label><input class="field" id="sPlace" value="${esc(s.place === 'A definir' ? '' : s.place)}" placeholder="A definir">
       <label class="l">Link do mapa (opcional)</label><input class="field" id="sPlaceUrl" value="${esc(s.place_url)}">
       <label class="l">Horário</label><input class="field" id="sTime" value="${esc(s.meet_time === 'A definir' ? '' : s.meet_time)}" placeholder="A definir (ex.: a partir das 12h30)">
@@ -591,13 +636,13 @@ function vAdmin() {
       <label class="l">Duplas do beach tennis</label><textarea class="field" id="sPairs" placeholder="Fulano + Ciclano">${esc(s.beach_pairs)}</textarea>
       <button class="btn primary" style="width:100%;margin-top:10px" data-act="admSettings">Salvar</button>
     </details>
-    <details class="adm"><summary>🏁 Resultados e travas (${S.events.filter((e) => e.pick_enabled).length})</summary>${results}</details>
-    <details class="adm"><summary>📺 Votações da TV (${S.polls.length})</summary>${polls}</details>
-    <details class="adm"><summary>👥 Participantes (${S.participants.length})</summary>${people || '<p class="muted">Ninguém ainda.</p>'}</details>
-    <details class="adm"><summary>🧊 Itens (${S.items.length})</summary>${S.items.map((i) => `<div class="item"><div class="grow"><b>${esc(i.name)}</b> <span class="muted tiny">${esc(i.qty)} · ${esc(nameOf(i.participant_id))}</span></div><button class="btn sm danger" data-act="admItemDel" data-id="${i.id}">Apagar</button></div>`).join('') || '<p class="muted">Vazio.</p>'}</details>
-    <details class="adm"><summary>📅 Programação (${S.events.length} eventos)</summary>
-      ${S.events.map((e) => `<details class="adm"><summary>${esc(e.title)} · ${e.starts_at ? fmtTime(e.starts_at) : 'A confirmar'}</summary>${evForm(e)}</details>`).join('')}
-      <details class="adm"><summary>➕ Novo evento</summary>${evForm(null)}</details>
+    <details class="adm" data-key="results"><summary>🏁 Resultados e travas (${S.events.filter((e) => e.pick_enabled).length})</summary>${results}</details>
+    <details class="adm" data-key="polls"><summary>📺 Votações da TV (${S.polls.length})</summary>${polls}</details>
+    <details class="adm" data-key="people"><summary>👥 Participantes (${S.participants.length})</summary>${people || '<p class="muted">Ninguém ainda.</p>'}</details>
+    <details class="adm" data-key="items"><summary>🧊 Itens (${S.items.length})</summary>${S.items.map((i) => `<div class="item"><div class="grow"><b>${esc(i.name)}</b> <span class="muted tiny">${esc(i.qty)} · ${esc(nameOf(i.participant_id))}</span></div><button class="btn sm danger" data-act="admItemDel" data-id="${i.id}">Apagar</button></div>`).join('') || '<p class="muted">Vazio.</p>'}</details>
+    <details class="adm" data-key="program"><summary>📅 Programação (${S.events.length} eventos)</summary>
+      ${S.events.map((e) => `<details class="adm" data-key="ev:${esc(e.id)}"><summary>${esc(e.title)} · ${e.starts_at ? fmtTime(e.starts_at) : 'A confirmar'}</summary>${evForm(e)}</details>`).join('')}
+      <details class="adm" data-key="ev:new"><summary>➕ Novo evento</summary>${evForm(null)}</details>
     </details>`;
 }
 
@@ -659,6 +704,20 @@ const actions = {
   async itemDel(b) { if (armed('i' + b.dataset.id, b)) await g('remove_item', { p_id: b.dataset.id }, 'Item removido'); },
   async pick(b) {
     if (!S.me) { toast(ERRORS.ENTRE_PRIMEIRO, true); go('convite'); return; } await g('set_pick', { p_event: b.dataset.ev, p_choice: b.dataset.v }, 'Palpite registrado 🎯'); },
+  nextPick() {
+    const e = pendingPicks()[0];
+    const el = e && document.getElementById('pk-' + e.id);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1200); }
+  },
+  async admLink(b) {
+    const code = await call('admin_get_link', { p_id: b.dataset.id, p_new: b.dataset.new === '1' }, b.dataset.new ? 'Link novo gerado' : null);
+    S.links[b.dataset.id] = `${location.origin + location.pathname}#entrar=${code}`;
+    render(true);
+  },
+  async admCopy(b) {
+    try { await navigator.clipboard.writeText(b.dataset.url); toast('Link copiado 📋'); }
+    catch { toast('Não consegui copiar. Segure o dedo no link para copiar.', true); }
+  },
   async retry() { await safeLoad(); if (!S.netError) toast('Atualizado ✅'); },
   async admSignups(b) { await call('admin_set_signups', { p_open: b.dataset.v === '1' }, b.dataset.v === '1' ? 'Inscrições reabertas' : 'Inscrições fechadas'); },
   async tv(b) {
@@ -697,7 +756,7 @@ const actions = {
     const row = b.closest('[data-p]');
     await call('admin_edit_participant', { p_id: b.dataset.id, p_name: $('[name=name]', row).value, p_rsvp: $('[name=rsvp]', row).value, p_beach: $('[name=beach]', row).checked }, 'Participante salvo');
   },
-  async admPRelease(b) { if (armed('r' + b.dataset.id, b)) await call('admin_release_device', { p_id: b.dataset.id }, 'Nome liberado: a pessoa pode entrar de novo com ele'); },
+  async admPRelease(b) { if (armed('r' + b.dataset.id, b)) await call('admin_release_device', { p_id: b.dataset.id }, 'Aparelhos desconectados. Mande o link pessoal para a pessoa.'); },
   async admPDel(b) { if (armed('d' + b.dataset.id, b)) await call('admin_delete_participant', { p_id: b.dataset.id }, 'Participante apagado'); },
   async admPMerge(b) {
     const target = $('[name=merge]', b.closest('[data-p]')).value;
@@ -751,7 +810,20 @@ document.addEventListener('keydown', (ev) => {
   if (ev.target.id === 'admPass') { ev.preventDefault(); $('[data-act=admLogin]')?.click(); }
 });
 
+async function redeemFromHash() {
+  const m = location.hash.match(/^#entrar=([0-9a-fA-F]+)/);
+  if (!m) return false;
+  history.replaceState(null, '', location.pathname + '#convite');
+  S.tab = 'convite';
+  const { error } = await sb.rpc('redeem_link', { p_token: TOKEN, p_code: m[1] });
+  await safeLoad();
+  if (error) { toast(error.message?.includes('LINK_INVALIDO') ? ERRORS.LINK_INVALIDO : 'Não deu certo: ' + error.message, true); return true; }
+  toast(`Pronto! Você entrou como ${meP()?.name || 'você'} ✅`);
+  return true;
+}
+
 window.addEventListener('hashchange', () => {
+  if (location.hash.startsWith('#entrar=')) { redeemFromHash(); return; }
   const t = location.hash.slice(1);
   if (t && t !== S.tab) go(t);
 });
@@ -771,7 +843,7 @@ async function start() {
   sb.auth.onAuthStateChange(() => setTimeout(() => refreshAdmin().then(() => S.ready && render()).catch(console.error), 0));
   setInterval(() => document.visibilityState === 'visible' && safeLoad(), 20000);
   await refreshAdmin().catch(console.error);
-  await safeLoad();
+  if (!(await redeemFromHash())) await safeLoad();
   setInterval(() => S.tab === 'palpites' && render(), 30000);
   document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && reload());
 }
